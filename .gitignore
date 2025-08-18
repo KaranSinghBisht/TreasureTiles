@@ -1,0 +1,26 @@
+# Ignore node_modules folder
+node_modules/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore build/ or dist/ folders
+build/
+dist/
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+# Foundry & Forge
+cache/
+broadcast/
+out/
+
+# Node / Hardhat artifacts
+node_modules/
+artifacts/
+coverage/
+
+# TypeScript build
+dist/
