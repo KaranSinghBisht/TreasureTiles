@@ -1,7 +1,9 @@
 'use client'
-import { useAccount, useConnect, useDisconnect, useReadContract, useWriteContract, usePublicClient, useChainId, useSwitchChain } from 'wagmi'
+import {
+  useAccount, useConnect, useDisconnect, useReadContract, useWriteContract,
+  usePublicClient, useChainId, useSwitchChain
+} from 'wagmi'
 import { baseSepolia } from 'wagmi/chains'
-import { injected } from 'wagmi/connectors'
 import { TREASURE_ABI } from '@/lib/abi'
 import { isBitSet, tileIndex, fmtEth } from '@/lib/utils'
 import { useMemo, useState } from 'react'
@@ -9,6 +11,30 @@ import { Bomb, Coins, Gem, Hammer, RefreshCw, Wallet } from 'lucide-react'
 
 const CONTRACT = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as `0x${string}`
 const DEFAULT = { rows: 6, cols: 6, bombs: 8, stakeEth: 0.01, callbackGas: 200_000 }
+
+// Types for getRound return
+type RoundView = readonly [
+  `0x${string}`,      // player
+  bigint,            // rows (uint8)
+  bigint,            // cols (uint8)
+  bigint,            // bombs (uint8)
+  boolean,           // active
+  boolean,           // settled
+  bigint,            // safeReveals (uint64)
+  bigint,            // stake (uint256)
+  bigint,            // revealedBitmap
+  `0x${string}`      // seed (bytes32)
+]
+
+// Narrow unknown errors into displayable text
+function errText(e: unknown): string {
+  if (e && typeof e === 'object') {
+    const o = e as { shortMessage?: unknown, message?: unknown }
+    if (typeof o.shortMessage === 'string') return o.shortMessage
+    if (typeof o.message === 'string') return o.message
+  }
+  try { return JSON.stringify(e) } catch { return String(e) }
+}
 
 export default function Page() {
   const { address, isConnected } = useAccount()
@@ -19,23 +45,24 @@ export default function Page() {
   const chainId = useChainId()
   const { switchChain } = useSwitchChain()
 
-  if (!publicClient) throw new Error('Public client not available')
-
   const [roundId, setRoundId] = useState<number | null>(null)
   const [status, setStatus] = useState<string>('')
 
   const { data: nextId } = useReadContract({
-    abi: TREASURE_ABI, address: CONTRACT, functionName: 'nextId', query: { refetchInterval: 5000 }
+    abi: TREASURE_ABI, address: CONTRACT, functionName: 'nextId',
+    query: { refetchInterval: 5000 }
   }) as { data?: bigint }
 
   const { data: round } = useReadContract({
     abi: TREASURE_ABI, address: CONTRACT, functionName: 'getRound',
     args: [BigInt(roundId ?? 0)],
     query: { enabled: roundId !== null, refetchInterval: 4000 },
-  }) as any
+  }) as { data?: RoundView }
 
-  const [player, rows, cols, bombs, active, settled, safeReveals, stake, revealedBitmap, seed] =
-    round ?? [undefined, 0,0,0,false,false,0n,0n,0n,'0x']
+  const [_player, rows, cols, bombs, active, settled, safeReveals, stake, revealedBitmap, seed] =
+    round ?? ([
+      '0x0000000000000000000000000000000000000000', 0n, 0n, 0n, false, false, 0n, 0n, 0n, '0x'
+    ] as RoundView)
 
   const payoutQuery = useReadContract({
     abi: TREASURE_ABI, address: CONTRACT, functionName: 'quotePayout',
@@ -46,27 +73,21 @@ export default function Page() {
 
   async function onCreate() {
     try {
-      if (!publicClient) {
-        setStatus('Wallet not ready')
-        return
-      }
-
-      setStatus('Creating round… (confirm in wallet)');
+      if (!publicClient) { setStatus('Wallet not ready'); return }
+      setStatus('Creating round… (confirm in wallet)')
       const hash = await writeContractAsync({
         chainId: baseSepolia.id,
         abi: TREASURE_ABI, address: CONTRACT, functionName: 'createRound',
         args: [DEFAULT.rows, DEFAULT.cols, DEFAULT.bombs],
         value: BigInt(DEFAULT.stakeEth * 1e18),
-      });
-      setStatus('Waiting for confirmation…');
-      await publicClient.waitForTransactionReceipt({ hash });
-      const nid = await publicClient.readContract({
-        address: CONTRACT, abi: TREASURE_ABI, functionName: 'nextId'
-      }) as bigint;
-      setRoundId(Number(nid - 1n));
-      setStatus('Round created.');
-    } catch (e: any) {
-      setStatus(e?.shortMessage || e?.message || 'Create failed');
+      })
+      setStatus('Waiting for confirmation…')
+      await publicClient.waitForTransactionReceipt({ hash })
+      const nid = await publicClient.readContract({ address: CONTRACT, abi: TREASURE_ABI, functionName: 'nextId' }) as bigint
+      setRoundId(Number(nid - 1n))
+      setStatus('Round created.')
+    } catch (e: unknown) {
+      setStatus(errText(e))
     }
   }
 
@@ -80,8 +101,8 @@ export default function Page() {
         args: [BigInt(roundId), DEFAULT.callbackGas],
       })
       setStatus('Seed requested. Waiting for fulfillment…')
-    } catch (e: any) {
-      setStatus(e?.shortMessage || e?.message || 'Tx failed')
+    } catch (e: unknown) {
+      setStatus(errText(e))
     }
   }
 
@@ -95,8 +116,8 @@ export default function Page() {
         args: [BigInt(roundId), r, c],
       })
       setStatus('Tile opened.')
-    } catch (e: any) {
-      setStatus(e?.shortMessage || e?.message || 'Tx failed')
+    } catch (e: unknown) {
+      setStatus(errText(e))
     }
   }
 
@@ -110,17 +131,18 @@ export default function Page() {
         args: [BigInt(roundId)],
       })
       setStatus('Cashed out.')
-    } catch (e: any) {
-      setStatus(e?.shortMessage || e?.message || 'Tx failed')
+    } catch (e: unknown) {
+      setStatus(errText(e))
     }
   }
 
   const grid = useMemo(() => {
     const arr: { r: number, c: number, idx: number, revealed: boolean }[] = []
-    for (let r = 0; r < Number(rows ?? 0); r++) {
-      for (let c = 0; c < Number(cols ?? 0); c++) {
-        const idx = tileIndex(Number(cols ?? 0), r, c)
-        const rev = isBitSet(BigInt(revealedBitmap ?? 0), idx)
+    const R = Number(rows ?? 0n), C = Number(cols ?? 0n)
+    for (let r = 0; r < R; r++) {
+      for (let c = 0; c < C; c++) {
+        const idx = tileIndex(C, r, c)
+        const rev = isBitSet(BigInt(revealedBitmap ?? 0n), idx)
         arr.push({ r, c, idx, revealed: rev })
       }
     }
@@ -162,25 +184,27 @@ export default function Page() {
           <div className="flex items-center gap-2 mb-3">
             <input
               className="bg-[#12131a] border border-[#222438] rounded-xl px-3 py-2 w-28 focus:outline-none focus:ring-2 focus:ring-[#00ffd1]"
-              type="number"
-              placeholder="Round ID"
+              type="number" placeholder="Round ID"
               value={roundId ?? ''}
               onChange={e => setRoundId(e.target.value ? Number(e.target.value) : null)}
             />
             <button
               className="px-3 py-2 rounded-xl bg-[#12131a] border border-[#222438]"
-              onClick={() => setRoundId(Number((nextId ?? 0n) - 1n))}
+              onClick={() => {
+                const n = (nextId ?? 0n)
+                setRoundId(n > 0n ? Number(n - 1n) : 0)
+              }}
             >
               Latest
             </button>
           </div>
 
           <div className="grid grid-cols-2 gap-3 text-sm mb-3">
-            <div>Rows: <b>{Number(rows||0)}</b></div>
-            <div>Cols: <b>{Number(cols||0)}</b></div>
-            <div>Bombs: <b>{Number(bombs||0)}</b></div>
-            <div>Safe: <b>{String(safeReveals||0)}</b></div>
-            <div>Stake: <b>{fmtEth(BigInt(stake||0)).toFixed(4)} ETH</b></div>
+            <div>Rows: <b>{Number(rows||0n)}</b></div>
+            <div>Cols: <b>{Number(cols||0n)}</b></div>
+            <div>Bombs: <b>{Number(bombs||0n)}</b></div>
+            <div>Safe: <b>{String(safeReveals||0n)}</b></div>
+            <div>Stake: <b>{fmtEth(BigInt(stake||0n)).toFixed(4)} ETH</b></div>
             <div>Active: <b className={active ? 'text-[#19ff81]' : 'text-[#9ca3af]'}>{String(active)}</b></div>
             <div>Settled: <b>{String(settled)}</b></div>
           </div>
